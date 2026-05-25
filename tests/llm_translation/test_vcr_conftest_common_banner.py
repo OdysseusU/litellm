@@ -9,7 +9,9 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from tests._vcr_conftest_common import (  # noqa: E402
+    VCR_DIAG_EMIT_MAX_LINES,
     emit_cassette_cache_session_banner,
+    emit_vcr_diagnostic_log,
 )
 from tests._vcr_redis_persister import (  # noqa: E402
     _cache_health,
@@ -161,6 +163,55 @@ def test_banner_silent_when_vcr_disabled(
     reporter = _FakeTerminalReporter()
 
     emit_cassette_cache_session_banner(reporter)
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic-log dedup + cap. CircleCI truncates step output to the last
+# ~400 KB; an unbounded diagnostic dump pushes the VCR classification summary
+# out of the retrievable window, so the dump must dedupe and cap.
+# ---------------------------------------------------------------------------
+
+
+def test_diagnostic_log_dedupes_repeated_blocks(tmp_path, monkeypatch):
+    monkeypatch.setenv("LITELLM_VCR_DIAG_DIR", str(tmp_path))
+    (tmp_path / "123.log").write_text(
+        "\n".join(["[vcr-key-fingerprint-matcher] differ"] * 40 + ["unique line"]),
+        encoding="utf-8",
+    )
+    reporter = _FakeTerminalReporter()
+
+    emit_vcr_diagnostic_log(reporter)
+
+    out = reporter.output
+    # The repeated block collapses to a single line with an occurrence count.
+    assert out.count("[vcr-key-fingerprint-matcher] differ") == 1
+    assert "(x40)" in out
+    assert "unique line" in out
+
+
+def test_diagnostic_log_caps_unique_lines(tmp_path, monkeypatch):
+    monkeypatch.setenv("LITELLM_VCR_DIAG_DIR", str(tmp_path))
+    total = VCR_DIAG_EMIT_MAX_LINES + 50
+    (tmp_path / "123.log").write_text(
+        "\n".join(f"unique-diagnostic-{i}" for i in range(total)), encoding="utf-8"
+    )
+    reporter = _FakeTerminalReporter()
+
+    emit_vcr_diagnostic_log(reporter)
+
+    out = reporter.output
+    emitted = sum(1 for ln in out.splitlines() if ln.startswith("unique-diagnostic-"))
+    assert emitted == VCR_DIAG_EMIT_MAX_LINES
+    assert "more unique diagnostic line(s) suppressed" in out
+
+
+def test_diagnostic_log_silent_when_no_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("LITELLM_VCR_DIAG_DIR", str(tmp_path / "does-not-exist"))
+    reporter = _FakeTerminalReporter()
+
+    emit_vcr_diagnostic_log(reporter)
+
+    assert reporter.output == ""
 
     assert reporter.output == ""
 
